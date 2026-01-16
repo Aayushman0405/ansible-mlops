@@ -1,0 +1,44 @@
+---
+- name: Deploy NGINX Ingress Controller
+  shell: |
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/baremetal/deploy.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Patch ingress controller for hostNetwork
+  copy:
+    content: |
+      spec:
+        template:
+          spec:
+            hostNetwork: true
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+    dest: /tmp/ingress-patch.yaml
+  delegate_to: control01
+
+- name: Apply patch
+  shell: |
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --patch-file /tmp/ingress-patch.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Apply nginx configuration
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ingress-nginx-controller
+        namespace: ingress-nginx
+      data:
+        proxy-body-size: "20m"
+        use-forwarded-headers: "true"
+    dest: /tmp/nginx-config.yaml
+  delegate_to: control01
+
+- name: Create nginx config
+  shell: |
+    kubectl apply -f /tmp/nginx-config.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
