@@ -1,0 +1,31 @@
+---
+- name: Create namespaces
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: mlflow
+      ---
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: ml-inference
+      ---
+      apiVersion: v1
+        kind: Namespace
+      metadata:
+        name: monitoring
+      ---
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: ai-debugger
+    dest: /tmp/namespaces.yaml
+  delegate_to: control01
+
+- name: Apply namespaces
+  shell: |
+    kubectl apply -f /tmp/namespaces.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
