@@ -1,0 +1,9 @@
+---
+- name: Read join command
+  local_action:
+    module: slurp
+    src: /tmp/join-command.txt
+  register: join_file
+
+- name: Join Kubernetes cluster
+  shell: "{{ join_file.content | b64decode }}"
