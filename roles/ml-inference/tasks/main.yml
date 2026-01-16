@@ -1,0 +1,192 @@
+---
+- name: Create inference secret
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ml-inference-secret
+        namespace: ml-inference
+      type: Opaque
+      data:
+        api-key: {{ secrets.api_key | b64encode }}
+    dest: /tmp/inference-secret.yaml
+  delegate_to: control01
+
+- name: Apply inference secret
+  shell: |
+    kubectl apply -f /tmp/inference-secret.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy ML Inference
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ml-inference
+        namespace: ml-inference
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: ml-inference
+        template:
+          metadata:
+            labels:
+              app: ml-inference
+          spec:
+            terminationGracePeriodSeconds: 30
+            containers:
+            - name: ml-inference
+              image: {{ images.inference }}
+              imagePullPolicy: Always
+              ports:
+              - containerPort: 8000
+              env:
+              - name: MODEL_NAME
+                value: nyc_taxi_rf
+              - name: MODEL_ALIAS
+                value: production
+              - name: MLFLOW_TRACKING_URI
+                value: http://mlflow.mlflow.svc.cluster.local:5000
+              - name: MLFLOW_S3_ENDPOINT_URL
+                value: http://rook-ceph-rgw-mlflow-store.rook-ceph.svc:80
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: rook-ceph-object-user-mlflow-store-mlflow-user
+                    key: AccessKey
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: rook-ceph-object-user-mlflow-store-mlflow-user
+                    key: SecretKey
+              - name: AWS_EC2_METADATA_DISABLED
+                value: "true"
+              - name: AWS_S3_ADDRESSING_STYLE
+                value: path
+              - name: API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: ml-inference-secret
+                    key: api-key
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 30
+                periodSeconds: 10
+              livenessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 60
+                periodSeconds: 15
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: 500m
+                  memory: 1Gi
+    dest: /tmp/inference-deployment.yaml
+  delegate_to: control01
+
+- name: Apply inference deployment
+  shell: |
+    kubectl apply -f /tmp/inference-deployment.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create inference service
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ml-inference
+        namespace: ml-inference
+      spec:
+        selector:
+          app: ml-inference
+        ports:
+          - port: 80
+            targetPort: 8000
+        type: ClusterIP
+    dest: /tmp/inference-service.yaml
+  delegate_to: control01
+
+- name: Apply inference service
+  shell: |
+    kubectl apply -f /tmp/inference-service.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create HPA for inference
+  copy:
+    content: |
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: ml-inference-hpa
+        namespace: ml-inference
+      spec:
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: ml-inference
+        minReplicas: 2
+        maxReplicas: 6
+        metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 60
+    dest: /tmp/inference-hpa.yaml
+  delegate_to: control01
+
+- name: Apply HPA
+  shell: |
+    kubectl apply -f /tmp/inference-hpa.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create inference ingress
+  copy:
+    content: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ml-inference-ingress
+        namespace: ml-inference
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - {{ inference_subdomain }}
+            secretName: ml-inference-tls
+        rules:
+          - host: {{ inference_subdomain }}
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ml-inference
+                      port:
+                        number: 80
+    dest: /tmp/inference-ingress.yaml
+  delegate_to: control01
+
+- name: Apply inference ingress
+  shell: |
+    kubectl apply -f /tmp/inference-ingress.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
