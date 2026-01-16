@@ -1,0 +1,402 @@
+---
+- name: Deploy Node Exporter
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: node-exporter
+        namespace: monitoring
+      spec:
+        selector:
+          matchLabels:
+            app: node-exporter
+        template:
+          metadata:
+            labels:
+              app: node-exporter
+          spec:
+            hostNetwork: true
+            containers:
+            - name: node-exporter
+              image: {{ images.node_exporter }}
+              args:
+                - "--path.rootfs=/host"
+              ports:
+              - containerPort: 9100
+              volumeMounts:
+              - name: root
+                mountPath: /host
+                readOnly: true
+            volumes:
+            - name: root
+              hostPath:
+                path: /
+    dest: /tmp/node-exporter.yaml
+  delegate_to: control01
+
+- name: Apply Node Exporter
+  shell: |
+    kubectl apply -f /tmp/node-exporter.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy kube-state-metrics
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kube-state-metrics
+        namespace: monitoring
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: kube-state-metrics
+        template:
+          metadata:
+            labels:
+              app: kube-state-metrics
+          spec:
+            containers:
+            - name: kube-state-metrics
+              image: {{ images.kube_state_metrics }}
+              ports:
+              - containerPort: 8080
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: kube-state-metrics
+        namespace: monitoring
+      spec:
+        selector:
+          app: kube-state-metrics
+        ports:
+        - port: 8080
+          targetPort: 8080
+    dest: /tmp/kube-state-metrics.yaml
+  delegate_to: control01
+
+- name: Apply kube-state-metrics
+  shell: |
+    kubectl apply -f /tmp/kube-state-metrics.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create Prometheus config
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: prometheus-config
+        namespace: monitoring
+      data:
+        prometheus.yml: |
+          global:
+            scrape_interval: 15s
+
+          rule_files:
+            - /etc/prometheus/alerts/*.yaml
+
+          scrape_configs:
+
+          - job_name: "node-exporter"
+            kubernetes_sd_configs:
+            - role: pod
+            relabel_configs:
+            - source_labels: [__meta_kubernetes_namespace]
+              action: keep
+              regex: monitoring
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              action: keep
+              regex: node-exporter
+            - source_labels: [__meta_kubernetes_pod_container_port_number]
+              action: keep
+              regex: "9100"
+
+          - job_name: "kube-state-metrics"
+            static_configs:
+            - targets:
+              - "kube-state-metrics.monitoring.svc.cluster.local:8080"
+
+          - job_name: "ml-inference"
+            metrics_path: /metrics
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_namespace]
+                action: keep
+                regex: ml-inference
+              - source_labels: [__meta_kubernetes_pod_container_port_number]
+                action: keep
+                regex: "8000"
+
+          - job_name: "ai-debugger"
+            metrics_path: /metrics
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_namespace]
+                action: keep
+                regex: ai-debugger
+              - source_labels: [__meta_kubernetes_pod_container_port_number]
+                action: keep
+                regex: "8000"
+    dest: /tmp/prometheus-config.yaml
+  delegate_to: control01
+
+- name: Apply Prometheus config
+  shell: |
+    kubectl apply -f /tmp/prometheus-config.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create Prometheus alerts
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: prometheus-alerts
+        namespace: monitoring
+      data:
+        ai-debugger-alerts.yaml: |
+          groups:
+          - name: ai-debugger-availability
+            rules:
+            - alert: AIDebuggerDown
+              expr: up{job="ai-debugger"} == 0
+              for: 1m
+              labels:
+                severity: critical
+                service: ai-debugger
+              annotations:
+                summary: "AI Debugger is down"
+                description: "Prometheus has not been able to scrape ai-debugger for 1 minute"
+
+          - name: ai-debugger-errors
+            rules:
+            - alert: AIDebuggerHighErrorRate
+              expr: |
+                (
+                  rate(ai_debugger_analyze_requests_total{status="error"}[5m])
+                  /
+                  rate(ai_debugger_analyze_requests_total[5m])
+                ) > 0.05
+              for: 2m
+              labels:
+                severity: warning
+                service: ai-debugger
+              annotations:
+                summary: "High error rate in AI Debugger"
+                description: "More than 5% of analyze requests are failing for 2 minutes"
+
+          - name: ai-debugger-latency
+            rules:
+            - alert: AIDebuggerHighLatency
+              expr: |
+                histogram_quantile(
+                  0.95,
+                  rate(ai_debugger_analyze_latency_seconds_bucket[5m])
+                ) > 1.5
+              for: 3m
+              labels:
+                severity: warning
+                service: ai-debugger
+              annotations:
+                summary: "AI Debugger latency is high"
+                description: "p95 analyze latency > 1.5s for 3 minutes"
+    dest: /tmp/prometheus-alerts.yaml
+  delegate_to: control01
+
+- name: Apply Prometheus alerts
+  shell: |
+    kubectl apply -f /tmp/prometheus-alerts.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create Prometheus RBAC
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: prometheus
+        namespace: monitoring
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: prometheus
+      rules:
+      - apiGroups: [""]
+        resources:
+          - nodes
+          - nodes/proxy
+          - services
+          - endpoints
+          - pods
+        verbs: ["get", "list", "watch"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: prometheus
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: prometheus
+      subjects:
+      - kind: ServiceAccount
+        name: prometheus
+        namespace: monitoring
+    dest: /tmp/prometheus-rbac.yaml
+  delegate_to: control01
+
+- name: Apply Prometheus RBAC
+  shell: |
+    kubectl apply -f /tmp/prometheus-rbac.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy Prometheus
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: prometheus
+        namespace: monitoring
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: prometheus
+        template:
+          metadata:
+            labels:
+              app: prometheus
+          spec:
+            serviceAccountName: prometheus
+            containers:
+            - name: prometheus
+              image: {{ images.prometheus }}
+              args:
+                - "--config.file=/etc/prometheus/prometheus.yml"
+              ports:
+              - containerPort: 9090
+              volumeMounts:
+              - name: config
+                mountPath: /etc/prometheus
+              - name: alerts
+                mountPath: /etc/prometheus/alerts
+            volumes:
+            - name: config
+              configMap:
+                name: prometheus-config
+            - name: alerts
+              configMap:
+                name: prometheus-alerts
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: prometheus
+        namespace: monitoring
+      spec:
+        selector:
+          app: prometheus
+        ports:
+        - port: 9090
+          targetPort: 9090
+    dest: /tmp/prometheus.yaml
+  delegate_to: control01
+
+- name: Apply Prometheus
+  shell: |
+    kubectl apply -f /tmp/prometheus.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy Grafana
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+        namespace: monitoring
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: grafana
+        template:
+          metadata:
+            labels:
+              app: grafana
+          spec:
+            containers:
+            - name: grafana
+              image: {{ images.grafana }}
+              ports:
+              - containerPort: 3000
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana
+        namespace: monitoring
+      spec:
+        selector:
+          app: grafana
+        ports:
+        - port: 3000
+          targetPort: 3000
+    dest: /tmp/grafana.yaml
+  delegate_to: control01
+
+- name: Apply Grafana
+  shell: |
+    kubectl apply -f /tmp/grafana.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create Grafana ingress
+  copy:
+    content: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: grafana
+        namespace: monitoring
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+      spec:
+        ingressClassName: nginx
+        tls:
+        - hosts:
+          - {{ grafana_subdomain }}
+          secretName: grafana-tls
+        rules:
+        - host: {{ grafana_subdomain }}
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: grafana
+                  port:
+                    number: 3000
+    dest: /tmp/grafana-ingress.yaml
+  delegate_to: control01
+
+- name: Apply Grafana ingress
+  shell: |
+    kubectl apply -f /tmp/grafana-ingress.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
