@@ -1,0 +1,42 @@
+# Network Configuration
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+# Kubernetes Version
+k8s_version: "1.29.15"
+
+# HAProxy Configuration
+haproxy_k8s_api_port: 6443
+haproxy_http_port: 80
+haproxy_https_port: 443
+control_plane_ips:
+  - "10.10.0.11:6443"
+
+# Domain Configuration
+domain: "aayushmandev.space"
+grafana_subdomain: "grafana.{{ domain }}"
+inference_subdomain: "inference.{{ domain }}"
+debugger_subdomain: "debugger.{{ domain }}"
+
+# Docker Configuration
+docker_version: "24.0.9"
+
+# Rook Ceph Configuration
+ceph_version: "v18.2.0"
+
+# Container Images
+images:
+  mlflow: "aayud/mlflow-mysql:2.12.1"
+  inference: "aayud/nyc-taxi-inference:v2"
+  ai_debugger: "aayud/ai-production-debugger:latest"
+  mysql: "mysql:8.0"
+  grafana: "grafana/grafana:10.4.2"
+  prometheus: "prom/prometheus:v2.51.0"
+  node_exporter: "prom/node-exporter:v1.7.0"
+  kube_state_metrics: "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.0"
+  nginx_ingress: "registry.k8s.io/ingress-nginx/controller:v1.10.1"
+
+# Secrets (would be stored in Ansible Vault in production)
+secrets:
+  api_key: "dummy-key"
+  ceph_admin_key: "AQDVYE5pEY+jLBAA2EYDAq1kG5/CDNtpDPFWVg=="
