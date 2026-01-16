@@ -1,0 +1,156 @@
+---
+- name: Create AI Debugger RBAC
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ai-debugger-sa
+        namespace: ai-debugger
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: ai-debugger-readonly
+        namespace: ai-debugger
+      rules:
+        - apiGroups: [""]
+          resources:
+            - pods
+            - pods/status
+            - events
+          verbs:
+            - get
+            - list
+            - watch
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: ai-debugger-readonly-binding
+        namespace: ai-debugger
+      subjects:
+        - kind: ServiceAccount
+          name: ai-debugger-sa
+          namespace: ai-debugger
+      roleRef:
+        kind: Role
+        name: ai-debugger-readonly
+        apiGroup: rbac.authorization.k8s.io
+    dest: /tmp/ai-debugger-rbac.yaml
+  delegate_to: control01
+
+- name: Apply AI Debugger RBAC
+  shell: |
+    kubectl apply -f /tmp/ai-debugger-rbac.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy AI Debugger
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ai-debugger
+        namespace: ai-debugger
+        labels:
+          app: ai-debugger
+      spec:
+        replicas: 1
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxUnavailable: 0
+            maxSurge: 1
+        selector:
+          matchLabels:
+            app: ai-debugger
+        template:
+          metadata:
+            labels:
+              app: ai-debugger
+          spec:
+            serviceAccountName: ai-debugger-sa
+            containers:
+              - name: api
+                image: {{ images.ai_debugger }}
+                imagePullPolicy: Always
+                ports:
+                  - containerPort: 8000
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "300m"
+                    memory: "256Mi"
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ai-debugger
+        namespace: ai-debugger
+      spec:
+        type: ClusterIP
+        selector:
+          app: ai-debugger
+        ports:
+          - port: 80
+            targetPort: 8000
+    dest: /tmp/ai-debugger.yaml
+  delegate_to: control01
+
+- name: Apply AI Debugger
+  shell: |
+    kubectl apply -f /tmp/ai-debugger.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create AI Debugger ingress
+  copy:
+    content: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ai-debugger
+        namespace: ai-debugger
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - {{ debugger_subdomain }}
+            secretName: debugger-tls
+        rules:
+          - host: {{ debugger_subdomain }}
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ai-debugger
+                      port:
+                        number: 80
+    dest: /tmp/ai-debugger-ingress.yaml
+  delegate_to: control01
+
+- name: Apply AI Debugger ingress
+  shell: |
+    kubectl apply -f /tmp/ai-debugger-ingress.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
