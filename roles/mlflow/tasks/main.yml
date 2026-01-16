@@ -1,0 +1,217 @@
+---
+- name: Create MySQL PVC
+  copy:
+    content: |
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: mlflow-mysql-pvc
+        namespace: mlflow
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+    dest: /tmp/mysql-pvc.yaml
+  delegate_to: control01
+
+- name: Apply MySQL PVC
+  shell: |
+    kubectl apply -f /tmp/mysql-pvc.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy MySQL
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mlflow-mysql
+        namespace: mlflow
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: mlflow-mysql
+        template:
+          metadata:
+            labels:
+              app: mlflow-mysql
+          spec:
+            containers:
+            - name: mysql
+              image: {{ images.mysql }}
+              env:
+              - name: MYSQL_ROOT_PASSWORD
+                value: rootpass
+              - name: MYSQL_DATABASE
+                value: mlflow
+              - name: MYSQL_USER
+                value: mlflow
+              - name: MYSQL_PASSWORD
+                value: mlflowpass
+              ports:
+              - containerPort: 3306
+              volumeMounts:
+              - name: mysql-data
+                mountPath: /var/lib/mysql
+            volumes:
+            - name: mysql-data
+              persistentVolumeClaim:
+                claimName: mlflow-mysql-pvc
+    dest: /tmp/mysql-deployment.yaml
+  delegate_to: control01
+
+- name: Apply MySQL deployment
+  shell: |
+    kubectl apply -f /tmp/mysql-deployment.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create MySQL service
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: mlflow-mysql
+        namespace: mlflow
+      spec:
+        selector:
+          app: mlflow-mysql
+        ports:
+        - port: 3306
+          targetPort: 3306
+    dest: /tmp/mysql-service.yaml
+  delegate_to: control01
+
+- name: Apply MySQL service
+  shell: |
+    kubectl apply -f /tmp/mysql-service.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create MLflow artifacts PVC
+  copy:
+    content: |
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: mlflow-artifacts-pvc
+        namespace: mlflow
+      spec:
+        accessModes:
+          - ReadWriteMany
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: cephfs
+    dest: /tmp/mlflow-pvc.yaml
+  delegate_to: control01
+
+- name: Apply MLflow PVC
+  shell: |
+    kubectl apply -f /tmp/mlflow-pvc.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy MLflow
+  copy:
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mlflow
+        namespace: mlflow
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: mlflow
+        template:
+          metadata:
+            labels:
+              app: mlflow
+          spec:
+            initContainers:
+            - name: wait-for-mysql
+              image: {{ images.mysql }}
+              command:
+                - sh
+                - -c
+                - |
+                  until mysqladmin ping \
+                    -h mlflow-mysql.mlflow.svc.cluster.local \
+                    -u mlflow \
+                    -pmlflowpass \
+                    --silent; do
+                    echo "Waiting for MySQL...";
+                    sleep 5;
+                  done
+            containers:
+            - name: mlflow
+              image: {{ images.mlflow }}
+              imagePullPolicy: Always
+              command: ["mlflow"]
+              args:
+                - server
+                - --host
+                - 0.0.0.0
+                - --port
+                - "5000"
+                - --backend-store-uri
+                - mysql+pymysql://mlflow:mlflowpass@mlflow-mysql.mlflow.svc.cluster.local:3306/mlflow
+                - --default-artifact-root
+                - s3://mlflow-artifacts
+              env:
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: rook-ceph-object-user-mlflow-store-mlflow-user
+                    key: AccessKey
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: rook-ceph-object-user-mlflow-store-mlflow-user
+                    key: SecretKey
+              - name: AWS_EC2_METADATA_DISABLED
+                value: "true"
+              - name: AWS_S3_ADDRESSING_STYLE
+                value: path
+              - name: MLFLOW_S3_ENDPOINT_URL
+                value: http://rook-ceph-rgw-mlflow-store.rook-ceph.svc:80
+              ports:
+              - containerPort: 5000
+    dest: /tmp/mlflow-deployment.yaml
+  delegate_to: control01
+
+- name: Apply MLflow deployment
+  shell: |
+    kubectl apply -f /tmp/mlflow-deployment.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create MLflow service
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: mlflow
+        namespace: mlflow
+      spec:
+        selector:
+          app: mlflow
+        ports:
+        - port: 5000
+          targetPort: 5000
+    dest: /tmp/mlflow-service.yaml
+  delegate_to: control01
+
+- name: Apply MLflow service
+  shell: |
+    kubectl apply -f /tmp/mlflow-service.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
