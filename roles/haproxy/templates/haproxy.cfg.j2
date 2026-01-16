@@ -1,0 +1,79 @@
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    log         127.0.0.1 local2
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+
+    stats socket /var/lib/haproxy/stats
+
+#---------------------------------------------------------------------
+# Defaults (TCP – NOT HTTP)
+#---------------------------------------------------------------------
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    timeout connect 10s
+    timeout client  1m
+    timeout server  1m
+
+#---------------------------------------------------------------------
+# Kubernetes API Frontend
+#---------------------------------------------------------------------
+frontend kubernetes_api
+    bind *:{{ haproxy_k8s_api_port }}
+    default_backend k8s_control_plane
+
+#---------------------------------------------------------------------
+# Kubernetes Control Plane Backend
+#---------------------------------------------------------------------
+backend k8s_control_plane
+    balance roundrobin
+    option tcp-check
+{% for server in control_plane_ips %}
+    server control0{{ loop.index }} {{ server }} check
+{% endfor %}
+
+#---------------------------------------------------------------------
+# HTTP Frontend (Ingress)
+#---------------------------------------------------------------------
+frontend http_ingress
+    bind *:{{ haproxy_http_port }}
+    mode tcp
+    default_backend ingress_http
+
+#---------------------------------------------------------------------
+# HTTPS Frontend (Ingress)
+#---------------------------------------------------------------------
+frontend https_ingress
+    bind *:{{ haproxy_https_port }}
+    mode tcp
+    default_backend ingress_https
+
+#---------------------------------------------------------------------
+# Ingress HTTP Backend
+#---------------------------------------------------------------------
+backend ingress_http
+    mode tcp
+    balance roundrobin
+    server control01 10.10.0.11:{{ haproxy_http_port }} check
+    server worker01  10.10.0.13:{{ haproxy_http_port }} check
+    server worker02  10.10.0.14:{{ haproxy_http_port }} check
+    server worker03  10.10.0.15:{{ haproxy_http_port }} check
+
+#---------------------------------------------------------------------
+# Ingress HTTPS Backend
+#---------------------------------------------------------------------
+backend ingress_https
+    mode tcp
+    balance roundrobin
+    server control01 10.10.0.11:{{ haproxy_https_port }} check
+    server worker01  10.10.0.13:{{ haproxy_https_port }} check
+    server worker02  10.10.0.14:{{ haproxy_https_port }} check
+    server worker03  10.10.0.15:{{ haproxy_https_port }} check
