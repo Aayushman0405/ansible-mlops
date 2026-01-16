@@ -1,0 +1,15 @@
+---
+- name: Deploy Calico networking
+  shell: |
+    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Wait for Calico pods
+  shell: |
+    kubectl wait --namespace=kube-system \
+      --for=condition=ready pod \
+      --selector=k8s-app=calico-node \
+      --timeout=300s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
