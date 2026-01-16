@@ -1,0 +1,250 @@
+---
+- name: Create rook-ceph namespace
+  shell: |
+    kubectl create namespace rook-ceph
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Deploy Rook Ceph Operator
+  shell: |
+    kubectl apply -f https://raw.githubusercontent.com/rook/rook/v1.14.0/deploy/examples/crds.yaml
+    kubectl apply -f https://raw.githubusercontent.com/rook/rook/v1.14.0/deploy/examples/common.yaml
+    kubectl apply -f https://raw.githubusercontent.com/rook/rook/v1.14.0/deploy/examples/operator.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Wait for rook-ceph operator
+  shell: |
+    kubectl wait --namespace rook-ceph \
+      --for=condition=available deployment \
+      --selector=app=rook-ceph-operator \
+      --timeout=300s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephCluster configuration
+  copy:
+    content: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephCluster
+      metadata:
+        name: rook-ceph
+        namespace: rook-ceph
+      spec:
+        cephVersion:
+          image: quay.io/ceph/ceph:{{ ceph_version }}
+        dataDirHostPath: /var/lib/rook
+        mon:
+          count: 3
+          allowMultiplePerNode: false
+        mgr:
+          count: 1
+        dashboard:
+          enabled: true
+        storage:
+          useAllNodes: true
+          useAllDevices: false
+          devices:
+            - name: "sdb"
+    dest: /tmp/ceph-cluster.yaml
+  delegate_to: control01
+
+- name: Deploy CephCluster
+  shell: |
+    kubectl apply -f /tmp/ceph-cluster.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephFilesystem
+  copy:
+    content: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephFilesystem
+      metadata:
+        name: myfs
+        namespace: rook-ceph
+      spec:
+        metadataPool:
+          replicated:
+            size: 3
+        dataPools:
+          - replicated:
+              size: 3
+        preserveFilesystemOnDelete: true
+        metadataServer:
+          activeCount: 1
+          activeStandby: true
+    dest: /tmp/ceph-filesystem.yaml
+  delegate_to: control01
+
+- name: Deploy CephFilesystem
+  shell: |
+    kubectl apply -f /tmp/ceph-filesystem.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CSI secrets
+  copy:
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: rook-ceph-csi-cephfs-provisioner
+        namespace: rook-ceph
+      stringData:
+        adminID: admin
+        adminKey: {{ secrets.ceph_admin_key }}
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: rook-ceph-csi-cephfs-node
+        namespace: rook-ceph
+      stringData:
+        adminID: admin
+        adminKey: {{ secrets.ceph_admin_key }}
+    dest: /tmp/ceph-csi-secrets.yaml
+  delegate_to: control01
+
+- name: Apply CSI secrets
+  shell: |
+    kubectl apply -f /tmp/ceph-csi-secrets.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephFS StorageClass
+  copy:
+    content: |
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: cephfs
+      provisioner: rook-ceph.cephfs.csi.ceph.com
+      parameters:
+        clusterID: rook-ceph
+        fsName: myfs
+        pool: myfs-data0
+        csi.storage.k8s.io/provisioner-secret-name: rook-ceph-csi-cephfs-provisioner
+        csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+        csi.storage.k8s.io/node-stage-secret-name: rook-ceph-csi-cephfs-node
+        csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+        mounter: fuse
+      reclaimPolicy: Retain
+      allowVolumeExpansion: true
+      volumeBindingMode: Immediate
+    dest: /tmp/cephfs-sc.yaml
+  delegate_to: control01
+
+- name: Apply CephFS StorageClass
+  shell: |
+    kubectl apply -f /tmp/cephfs-sc.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephBlockPool
+  copy:
+    content: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephBlockPool
+      metadata:
+        name: replicapool
+        namespace: rook-ceph
+      spec:
+        failureDomain: host
+        replicated:
+          size: 2
+    dest: /tmp/ceph-blockpool.yaml
+  delegate_to: control01
+
+- name: Deploy CephBlockPool
+  shell: |
+    kubectl apply -f /tmp/ceph-blockpool.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create RBD StorageClass
+  copy:
+    content: |
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: ceph-rbd
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+      provisioner: rook-ceph.rbd.csi.ceph.com
+      parameters:
+        clusterID: rook-ceph
+        pool: replicapool
+        imageFormat: "2"
+        imageFeatures: layering
+        csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+        csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+        csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+        csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+      reclaimPolicy: Retain
+      allowVolumeExpansion: true
+      volumeBindingMode: Immediate
+    dest: /tmp/rbd-sc.yaml
+  delegate_to: control01
+
+- name: Apply RBD StorageClass
+  shell: |
+    kubectl apply -f /tmp/rbd-sc.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephObjectStore
+  copy:
+    content: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStore
+      metadata:
+        name: mlflow-store
+        namespace: rook-ceph
+      spec:
+        metadataPool:
+          replicated:
+            size: 1
+        dataPool:
+          replicated:
+            size: 1
+        gateway:
+          port: 80
+          instances: 1
+    dest: /tmp/object-store.yaml
+  delegate_to: control01
+
+- name: Deploy CephObjectStore
+  shell: |
+    kubectl apply -f /tmp/object-store.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create CephObjectStoreUser
+  copy:
+    content: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStoreUser
+      metadata:
+        name: aayud
+        namespace: rook-ceph
+      spec:
+        store: mlflow-store
+        displayName: "aayud"
+    dest: /tmp/object-user.yaml
+  delegate_to: control01
+
+- name: Deploy CephObjectStoreUser
+  shell: |
+    kubectl apply -f /tmp/object-user.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Wait for RGW service
+  shell: |
+    kubectl wait --namespace rook-ceph \
+      --for=condition=ready pod \
+      --selector=rgw=mlflow-store \
+      --timeout=300s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
