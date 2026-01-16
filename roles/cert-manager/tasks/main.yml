@@ -1,0 +1,41 @@
+---
+- name: Deploy cert-manager
+  shell: |
+    kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Wait for cert-manager
+  shell: |
+    kubectl wait --namespace cert-manager \
+      --for=condition=available deployment \
+      --all \
+      --timeout=300s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Create Let's Encrypt ClusterIssuer
+  copy:
+    content: |
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: letsencrypt-prod
+      spec:
+        acme:
+          server: https://acme-v02.api.letsencrypt.org/directory
+          email: admin@{{ domain }}
+          privateKeySecretRef:
+            name: letsencrypt-prod
+          solvers:
+          - http01:
+              ingress:
+                class: nginx
+    dest: /tmp/clusterissuer.yaml
+  delegate_to: control01
+
+- name: Apply ClusterIssuer
+  shell: |
+    kubectl apply -f /tmp/clusterissuer.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
