@@ -1,0 +1,97 @@
+---
+- name: Setup Complete MLOps Kubernetes Cluster
+  hosts: all
+  become: yes
+  gather_facts: yes
+  serial: 1
+
+- name: Configure HAProxy Load Balancer
+  hosts: haproxy
+  become: yes
+  roles:
+    - haproxy
+
+- name: Setup Common Requirements
+  hosts: k8s_cluster
+  become: yes
+  roles:
+    - common
+
+- name: Initialize Kubernetes Control Plane
+  hosts: control_plane
+  become: yes
+  roles:
+    - kubernetes/control-plane
+
+- name: Join Worker Nodes
+  hosts: workers
+  become: yes
+  roles:
+    - kubernetes/worker
+
+- name: Deploy Networking (Calico)
+  hosts: control_plane
+  become: yes
+  roles:
+    - kubernetes/networking
+
+- name: Deploy Ingress Nginx
+  hosts: control_plane
+  become: yes
+  roles:
+    - ingress-nginx
+
+- name: Deploy Cert Manager
+  hosts: control_plane
+  become: yes
+  roles:
+    - cert-manager
+
+- name: Deploy Rook Ceph Storage
+  hosts: control_plane
+  become: yes
+  roles:
+    - rook-ceph
+
+- name: Create Namespaces
+  hosts: control_plane
+  become: yes
+  roles:
+    - kubernetes/namespaces
+
+- name: Deploy MLflow
+  hosts: control_plane
+  become: yes
+  roles:
+    - mlflow
+
+- name: Deploy ML Inference Service
+  hosts: control_plane
+  become: yes
+  roles:
+    - ml-inference
+
+- name: Deploy Monitoring Stack
+  hosts: control_plane
+  become: yes
+  roles:
+    - monitoring
+
+- name: Deploy AI Debugger
+  hosts: control_plane
+  become: yes
+  roles:
+    - ai-debugger
+
+- name: Configure GitHub Runner Access
+  hosts: control_plane
+  become: yes
+  tasks:
+    - name: Copy kubeconfig for GitHub Actions
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/kubeconfig-ci/config
+        owner: root
+        group: root
+        mode: '0600'
+      when: "'control01' in inventory_hostname"
